@@ -1,0 +1,63 @@
+(* ===== Warden grammar, v0 scope with v1/v2 hooks marked ===== *)
+
+(* Statements end with NEWLINE or ";". The parser ignores NEWLINE after
+   binary operators, ",", "(", "{" and similar "unfinished" tokens. *)
+
+program     = { item } ;
+
+item        = fn_decl ;                       (* v1: | type_decl | enum_decl | use_decl *)
+
+(* ---- functions ---- *)
+fn_decl     = [ "pub" ] "fn" IDENT "(" [ params ] ")"
+              [ "->" type ]
+              [ uses_clause ]
+              block ;
+
+params      = param { "," param } [ "," ] ;
+param       = IDENT ":" type ;
+
+uses_clause = "uses" effect { "," effect } ;
+effect      = IDENT { "." IDENT } ;           (* e.g. fs.read, io.print *)
+
+(* ---- types ---- *)
+type        = IDENT ;                         (* int, bool, str, ... *)
+                                              (* v1: | "[" type "]" | IDENT "[" types "]" *)
+
+(* ---- statements and blocks ---- *)
+block       = "{" { stmt } [ expr ] "}" ;     (* optional trailing expr = block's value *)
+
+stmt        = let_stmt term
+            | assign_stmt term
+            | while_stmt
+            | return_stmt term
+            | expr term ;
+
+term        = NEWLINE | ";" ;
+
+let_stmt    = "let" [ "mut" ] IDENT [ ":" type ] "=" expr ;
+assign_stmt = IDENT "=" expr ;
+while_stmt  = "while" expr block ;
+return_stmt = "return" [ expr ] ;
+
+(* ---- expressions ---- *)
+expr        = if_expr
+            | binary ;
+
+if_expr     = "if" expr block [ "else" ( if_expr | block ) ] ;
+
+binary      = unary { BINOP unary } ;         (* precedence handled by pratt table below *)
+unary       = ( "-" | "!" ) unary | postfix ;
+postfix     = primary { call_suffix } ;       (* v1: | "." IDENT | "[" expr "]" | "?" *)
+call_suffix = "(" [ args ] ")" ;
+args        = expr { "," expr } [ "," ] ;
+
+primary     = INT | STRING | "true" | "false"
+            | IDENT
+            | "(" expr ")"
+            | block ;
+
+(* ---- tokens (lexer's job) ---- *)
+IDENT       = letter { letter | digit | "_" } ;
+INT         = digit { digit | "_" } ;
+STRING      = '"' { any char except '"' } '"' ;
+COMMENT     = "//" { any char except newline } ;   (* skipped by lexer *)
