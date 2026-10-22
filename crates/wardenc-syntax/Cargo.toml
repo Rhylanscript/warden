@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+logos = "0.15"
 
 [lints]
 workspace = true
