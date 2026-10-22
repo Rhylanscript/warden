@@ -1,0 +1,16 @@
+[package]
+name = "wardenc-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "warden"
+path = "src/main.rs"
+
+[dependencies]
+wardenc-syntax = { path = "../wardenc-syntax" }
+
+[lints]
+workspace = true

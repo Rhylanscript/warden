@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "warden check (current file)",
+      "cargo": { "args": ["build", "-p", "wardenc-cli"] },
+      "program": "${workspaceFolder}/target/debug/warden",
+      "args": ["check", "${file}"],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

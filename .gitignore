@@ -1,0 +1,13 @@
+/target
+*.o
+*.obj
+
+.DS_Store
+Thumbs.db
+
+__private__
+
+*.log
+*.logs
+
+*.test
