@@ -1,3 +1,4 @@
+use crate::env::{AssignError, Env};
 use crate::value::{RuntimeError, Value};
 use wardenc_syntax::ast::*;
 
@@ -17,17 +18,101 @@ fn overflow(span: &Span) -> RuntimeError {
     }
 }
 
-pub fn eval_expr(expr: &Node<Expr>) -> EvalResult {
+// --- blocks and statements ---
+
+pub fn eval_block(block: &Block, env: &mut Env) -> EvalResult {
+    env.push_scope();
+    let result = eval_block_body(block, env);
+    env.pop_scope();
+    result
+}
+
+fn eval_block_body(block: &Block, env: &mut Env) -> EvalResult {
+    for stmt in &block.stmts {
+        exec_stmt(stmt, env)?;
+    }
+    match &block.tail {
+        Some(tail) => eval_expr(tail, env),
+        None => Ok(Value::Unit),
+    }
+}
+
+fn exec_stmt(stmt: &Node<Stmt>, env: &mut Env) -> Result<(), RuntimeError> {
+    match &stmt.kind {
+        Stmt::Let {
+            name,
+            is_mut,
+            value,
+            ..
+        } => {
+            let v = eval_expr(value, env)?;
+            env.define(name, v, *is_mut);
+            Ok(())
+        }
+        Stmt::Assign { name, value } => {
+            let v = eval_expr(value, env)?;
+            match env.assign(name, v) {
+                Ok(()) => Ok(()),
+                Err(AssignError::Undefined) => {
+                    err(format!("undefined variable `{name}`"), &stmt.span)
+                }
+                Err(AssignError::Immutable) => err(
+                    format!("can't assign to `{name}` because it isn't `mut`"),
+                    &stmt.span,
+                ),
+            }
+        }
+        Stmt::While { cond, body } => {
+            loop {
+                let c = expect_bool(eval_expr(cond, env)?, &cond.span)?;
+                if !c {
+                    break;
+                }
+                eval_block(&body.kind, env)?;
+            }
+            Ok(())
+        }
+        Stmt::Return(_) => err("`return` isn't supported yet", &stmt.span),
+        Stmt::Expr(e) => {
+            eval_expr(e, env)?;
+            Ok(())
+        }
+    }
+}
+
+// --- expressions ---
+
+pub fn eval_expr(expr: &Node<Expr>, env: &mut Env) -> EvalResult {
     match &expr.kind {
         Expr::Int(n) => Ok(Value::Int(*n)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Str(s) => Ok(Value::Str(s.clone())),
+        Expr::Ident(name) => match env.get(name) {
+            Some(v) => Ok(v.clone()),
+            None => err(format!("undefined variable `{name}`"), &expr.span),
+        },
         Expr::Unary { op, operand } => {
-            let v = eval_expr(operand)?;
+            let v = eval_expr(operand, env)?;
             eval_unary(*op, v, &expr.span)
         }
-        Expr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, &expr.span),
-        _ => err("this kind of expression isn't supported yet", &expr.span),
+        Expr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, &expr.span, env),
+        Expr::Block(block) => eval_block(block, env),
+        Expr::If {
+            cond,
+            then_block,
+            else_branch,
+        } => {
+            let c = expect_bool(eval_expr(cond, env)?, &cond.span)?;
+            if c {
+                eval_block(&then_block.kind, env)
+            } else {
+                match else_branch {
+                    Some(e) => eval_expr(e, env),
+                    None => Ok(Value::Unit),
+                }
+            }
+        }
+        Expr::Call { .. } => err("function calls aren't supported yet", &expr.span),
     }
 }
 
@@ -43,13 +128,19 @@ fn eval_unary(op: UnaryOp, v: Value, span: &Span) -> EvalResult {
     }
 }
 
-fn eval_binary(op: BinaryOp, lhs: &Node<Expr>, rhs: &Node<Expr>, span: &Span) -> EvalResult {
+fn eval_binary(
+    op: BinaryOp,
+    lhs: &Node<Expr>,
+    rhs: &Node<Expr>,
+    span: &Span,
+    env: &mut Env,
+) -> EvalResult {
     if matches!(op, BinaryOp::And | BinaryOp::Or) {
-        return eval_logic(op, lhs, rhs);
+        return eval_logic(op, lhs, rhs, env);
     }
 
-    let l = eval_expr(lhs)?;
-    let r = eval_expr(rhs)?;
+    let l = eval_expr(lhs, env)?;
+    let r = eval_expr(rhs, env)?;
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => int_op(op, a, b, span),
         (Value::Bool(a), Value::Bool(b)) => eq_only(op, a == b, "bool", span),
@@ -92,14 +183,14 @@ fn int_op(op: BinaryOp, a: i64, b: i64, span: &Span) -> EvalResult {
     }
 }
 
-fn eval_logic(op: BinaryOp, lhs: &Node<Expr>, rhs: &Node<Expr>) -> EvalResult {
-    let l = expect_bool(eval_expr(lhs)?, &lhs.span)?;
+fn eval_logic(op: BinaryOp, lhs: &Node<Expr>, rhs: &Node<Expr>, env: &mut Env) -> EvalResult {
+    let l = expect_bool(eval_expr(lhs, env)?, &lhs.span)?;
     match (op, l) {
         (BinaryOp::And, false) => return Ok(Value::Bool(false)),
         (BinaryOp::Or, true) => return Ok(Value::Bool(true)),
         _ => {}
     }
-    let r = expect_bool(eval_expr(rhs)?, &rhs.span)?;
+    let r = expect_bool(eval_expr(rhs, env)?, &rhs.span)?;
     Ok(Value::Bool(r))
 }
 
@@ -121,13 +212,7 @@ mod tests {
     fn run(src: &str) -> EvalResult {
         let program = parse(&format!("fn main() {{ {src} }}")).expect("should parse");
         let Item::Fn(f) = &program.items[0].kind;
-        let tail = f
-            .body
-            .kind
-            .tail
-            .as_ref()
-            .expect("expected a tail expression");
-        eval_expr(tail)
+        eval_block(&f.body.kind, &mut Env::new())
     }
 
     fn msg(src: &str) -> String {
@@ -171,5 +256,60 @@ mod tests {
         assert_eq!(msg("1 + true"), "can't use this operator on int and bool");
         assert_eq!(msg("-true"), "can't negate a bool");
         assert_eq!(msg("1 && true"), "expected a bool, got a int");
+    }
+
+    #[test]
+    fn let_and_use() {
+        assert_eq!(run("let x = 5\n x * 2"), Ok(Value::Int(10)));
+    }
+
+    #[test]
+    fn shadowing_sees_the_old_value() {
+        assert_eq!(run("let x = 1\n let x = x + 1\n x"), Ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn assignment_needs_mut() {
+        assert_eq!(run("let mut x = 1\n x = x + 4\n x"), Ok(Value::Int(5)));
+        assert_eq!(
+            msg("let x = 1\n x = 2\n x"),
+            "can't assign to `x` because it isn't `mut`"
+        );
+    }
+
+    #[test]
+    fn undefined_variables() {
+        assert_eq!(msg("y"), "undefined variable `y`");
+        assert_eq!(msg("y = 1\n 0"), "undefined variable `y`");
+    }
+
+    #[test]
+    fn blocks_have_their_own_scope() {
+        assert_eq!(
+            run("let x = 1\n let y = { let x = 2\n x + 10 }\n x + y"),
+            Ok(Value::Int(13))
+        );
+        assert_eq!(run("let mut x = 1\n { x = 5 }\n x"), Ok(Value::Int(5)));
+        assert_eq!(msg("{ let z = 1\n z }\n z"), "undefined variable `z`");
+    }
+
+    #[test]
+    fn while_loops() {
+        let src = "let mut i = 0\n let mut total = 0\n while i < 5 {\n total = total + i\n i = i + 1\n }\n total";
+        assert_eq!(run(src), Ok(Value::Int(10)));
+    }
+
+    #[test]
+    fn if_expressions() {
+        assert_eq!(
+            run("let x = 5\n if x > 3 { 1 } else { 2 }"),
+            Ok(Value::Int(1))
+        );
+        assert_eq!(
+            run("if false { 1 } else if true { 2 } else { 3 }"),
+            Ok(Value::Int(2))
+        );
+        assert_eq!(run("if false { 1 }"), Ok(Value::Unit));
+        assert_eq!(msg("if 1 { 2 }"), "expected a bool, got a int");
     }
 }
