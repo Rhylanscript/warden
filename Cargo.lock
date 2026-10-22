@@ -118,6 +118,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wardenc-interp"
+version = "0.0.1"
+dependencies = [
+ "wardenc-syntax",
+]
+
+[[package]]
 name = "wardenc-syntax"
 version = "0.0.1"
 dependencies = [
