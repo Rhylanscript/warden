@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 wardenc-syntax = { path = "../wardenc-syntax" }
+wardenc-interp = { path = "../wardenc-interp" }
 
 [lints]
 workspace = true

@@ -1,12 +1,14 @@
+use std::ops::Range;
 use std::process::ExitCode;
+use wardenc_interp::eval::run_program;
 use wardenc_syntax::lexer::lex;
 use wardenc_syntax::parser::parse;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() != 3 || !matches!(args[1].as_str(), "lex" | "parse") {
-        eprintln!("usage: warden <lex|parse> <file>");
+    if args.len() != 3 || !matches!(args[1].as_str(), "lex" | "parse" | "run") {
+        eprintln!("usage: warden <lex|parse|run> <file>");
         return ExitCode::FAILURE;
     }
 
@@ -18,10 +20,10 @@ fn main() -> ExitCode {
         }
     };
 
-    if args[1] == "lex" {
-        run_lex(&src)
-    } else {
-        run_parse(&args[2], &src)
+    match args[1].as_str() {
+        "lex" => run_lex(&src),
+        "parse" => run_parse(&args[2], &src),
+        _ => run_file(&args[2], &src),
     }
 }
 
@@ -52,12 +54,51 @@ fn run_parse(file: &str, src: &str) -> ExitCode {
         }
         Err(errors) => {
             for e in errors {
-                let (line, col) = line_col(src, e.span.start);
-                eprintln!("error: {}\n  --> {file}:{line}:{col}", e.message);
+                report(file, src, &e.message, &e.span);
             }
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_file(file: &str, src: &str) -> ExitCode {
+    let program = match parse(src) {
+        Ok(p) => p,
+        Err(errors) => {
+            for e in errors {
+                report(file, src, &e.message, &e.span);
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Deep recursion in Warden is deep recursion in Rust, so run the
+    // interpreter on a thread with a big stack
+    let result = std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn_scoped(s, || {
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                run_program(&program, &mut out)
+            })
+            .expect("couldn't start the interpreter thread")
+            .join()
+            .expect("the interpreter thread panicked")
+    });
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            report(file, src, &e.message, &e.span);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn report(file: &str, src: &str, message: &str, span: &Range<usize>) {
+    let (line, col) = line_col(src, span.start);
+    eprintln!("error: {message}\n  --> {file}:{line}:{col}");
 }
 
 fn line_col(src: &str, offset: usize) -> (usize, usize) {
