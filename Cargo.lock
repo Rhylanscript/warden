@@ -121,6 +121,7 @@ dependencies = [
 name = "wardenc-cli"
 version = "0.0.1"
 dependencies = [
+ "wardenc-check",
  "wardenc-interp",
  "wardenc-syntax",
 ]
