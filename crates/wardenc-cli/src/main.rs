@@ -1,14 +1,16 @@
 use std::ops::Range;
 use std::process::ExitCode;
+use wardenc_check::check;
 use wardenc_interp::eval::run_program;
+use wardenc_syntax::ast::Program;
 use wardenc_syntax::lexer::lex;
 use wardenc_syntax::parser::parse;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() != 3 || !matches!(args[1].as_str(), "lex" | "parse" | "run") {
-        eprintln!("usage: warden <lex|parse|run> <file>");
+    if args.len() != 3 || !matches!(args[1].as_str(), "lex" | "parse" | "run" | "check") {
+        eprintln!("usage: warden <lex|parse|run|check> <file>");
         return ExitCode::FAILURE;
     }
 
@@ -23,6 +25,7 @@ fn main() -> ExitCode {
     match args[1].as_str() {
         "lex" => run_lex(&src),
         "parse" => run_parse(&args[2], &src),
+        "check" => run_check(&args[2], &src),
         _ => run_file(&args[2], &src),
     }
 }
@@ -62,14 +65,8 @@ fn run_parse(file: &str, src: &str) -> ExitCode {
 }
 
 fn run_file(file: &str, src: &str) -> ExitCode {
-    let program = match parse(src) {
-        Ok(p) => p,
-        Err(errors) => {
-            for e in errors {
-                report(file, src, &e.message, &e.span);
-            }
-            return ExitCode::FAILURE;
-        }
+    let Some(program) = parse_and_check(file, src) else {
+        return ExitCode::FAILURE;
     };
 
     // Deep recursion in Warden is deep recursion in Rust, so run the
@@ -93,6 +90,36 @@ fn run_file(file: &str, src: &str) -> ExitCode {
             report(file, src, &e.message, &e.span);
             ExitCode::FAILURE
         }
+    }
+}
+
+/// parse then effect check; prints every error and returns None if anything failed
+fn parse_and_check(file: &str, src: &str) -> Option<Program> {
+    let program = match parse(src) {
+        Ok(p) => p,
+        Err(errors) => {
+            for e in errors {
+                report(file, src, &e.message, &e.span);
+            }
+            return None;
+        }
+    };
+    if let Err(errors) = check(&program) {
+        for e in errors {
+            report(file, src, &e.message, &e.span);
+        }
+        return None;
+    }
+    Some(program)
+}
+
+fn run_check(file: &str, src: &str) -> ExitCode {
+    match parse_and_check(file, src) {
+        Some(_) => {
+            println!("ok");
+            ExitCode::SUCCESS
+        }
+        None => ExitCode::FAILURE,
     }
 }
 
