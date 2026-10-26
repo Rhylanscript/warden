@@ -7,7 +7,7 @@
       "name": "warden check (current file)",
       "cargo": { "args": ["build", "-p", "wardenc-cli"] },
       "program": "${workspaceFolder}/target/debug/warden",
-      "args": ["parse", "${file}"],
+      "args": ["check", "${file}"],
       "cwd": "${workspaceFolder}"
     }
   ]

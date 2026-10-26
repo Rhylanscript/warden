@@ -1,0 +1,12 @@
+[package]
+name = "wardenc-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wardenc-syntax = { path = "../wardenc-syntax" }
+
+[lints]
+workspace = true
