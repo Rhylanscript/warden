@@ -41,3 +41,23 @@ Warden recursion is Rust recursion. The CLI runs the interpreter on a 64MB stack
 ## Effects are checked statically in their own crate
 
 `wardenc-check` walks the AST & never runs anything. A parent effect covers its children (`io` covers `io.print`, not the other way round) The checker is separate from the interpreter and only the CLI wires them together
+
+## Private functions get their effects inferred
+
+Writing `uses` on every little helper is annoying. private functions with no `uses` clause get the union of everything they call. `pub` functions and `main` never infer, what they declare is the contract, and the body is checked by the compiler.
+
+## Inference is a fixpoint over the call graph
+
+Functions can call each other (`fib` calls itself), so there is no bottom to recurse to. Every inferred function starts at the empty set and gets recomputed from its callees current sets until a whole round changes nothing. It terminates because sets only grow and the number of effects in a program is finite.
+
+## An explicit `uses` on a private function is a ceiling
+
+If you write `uses` on a private function the compiler holds you to it: the body cant exceed it, and callers see exactly what you declared. Declaring more than the body needs is fine.
+
+## `main` is always fixed
+
+`main` is the entry point, which means its `uses` clause is the whole programs capability list. That is what `warden audit` will report later, so it has to be shown even though `main` is private.
+
+## Effect sets are normalised
+
+An effect set never holds a parent and one of its children, so `{io, io.print}` collapses to `{io}`. This keeps error messages and suggested `uses` clauses tidy. The suggestion in an error is always the complete clause to paste in rather than just the one missing effect.

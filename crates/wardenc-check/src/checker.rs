@@ -1,5 +1,7 @@
-use crate::effects::{EffectPath, covers, display, intrinsic_effect};
-use std::collections::HashMap;
+use crate::effects::display;
+use crate::infer::{
+    EffectTable, calls_in, declared_set, effective_effects, effects_of_call, is_fixed,
+};
 use wardenc_syntax::ast::*;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -11,24 +13,14 @@ pub struct CheckError {
 /// check every function in the program - unlike the parser we keep going after
 /// the first problem so one go reports all bad calls
 pub fn check(program: &Program) -> Result<(), Vec<CheckError>> {
-    // first pass: what each function declares
-    let mut table: HashMap<&str, Vec<EffectPath>> = HashMap::new();
-    for item in &program.items {
-        let Item::Fn(decl) = &item.kind;
-        table.insert(decl.name.as_str(), declared_effects(decl));
-    }
+    let table = effective_effects(program);
 
-    // second pass: walk every body and check each call against its functions `uses`
     let mut errors = Vec::new();
     for item in &program.items {
         let Item::Fn(decl) = &item.kind;
-        let mut fc = FnChecker {
-            fn_name: &decl.name,
-            allowed: declared_effects(decl),
-            table: &table,
-            errors: &mut errors,
-        };
-        fc.block(&decl.body.kind);
+        if is_fixed(decl) {
+            check_fn(decl, &table, &mut errors);
+        }
     }
 
     if errors.is_empty() {
@@ -38,100 +30,29 @@ pub fn check(program: &Program) -> Result<(), Vec<CheckError>> {
     }
 }
 
-fn declared_effects(decl: &FnDecl) -> Vec<EffectPath> {
-    decl.effects.iter().map(|e| e.kind.path.clone()).collect()
-}
-
-/// Checks the body of one function
-struct FnChecker<'a> {
-    fn_name: &'a str,
-    /// what this functions `uses` clause allows
-    allowed: Vec<EffectPath>,
-    /// what every function in the program declares
-    table: &'a HashMap<&'a str, Vec<EffectPath>>,
-    errors: &'a mut Vec<CheckError>,
-}
-
-impl FnChecker<'_> {
-    fn block(&mut self, block: &Block) {
-        for stmt in &block.stmts {
-            self.stmt(&stmt.kind);
-        }
-        if let Some(tail) = &block.tail {
-            self.expr(tail);
-        }
+/// Check one fixed function: every call in its body must be allowed by what
+/// the function declares
+fn check_fn(decl: &FnDecl, table: &EffectTable<'_>, errors: &mut Vec<CheckError>) {
+    let allowed = declared_set(decl);
+    let calls = calls_in(&decl.body.kind);
+    let mut suggested = allowed.clone();
+    for call in &calls {
+        suggested.extend(&effects_of_call(call.name, table));
     }
 
-    fn stmt(&mut self, stmt: &Stmt) {
-        match stmt {
-            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => self.expr(value),
-            Stmt::While { cond, body } => {
-                self.expr(cond);
-                self.block(&body.kind);
-            }
-            Stmt::Return(value) => {
-                if let Some(v) = value {
-                    self.expr(v);
-                }
-            }
-            Stmt::Expr(e) => self.expr(e),
-        }
-    }
-
-    fn expr(&mut self, expr: &Node<Expr>) {
-        match &expr.kind {
-            Expr::Int(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_) => {}
-            Expr::Unary { operand, .. } => self.expr(operand),
-            Expr::Binary { lhs, rhs, .. } => {
-                self.expr(lhs);
-                self.expr(rhs);
-            }
-            Expr::Block(block) => self.block(block),
-            Expr::If {
-                cond,
-                then_block,
-                else_branch,
-            } => {
-                self.expr(cond);
-                self.block(&then_block.kind);
-                if let Some(e) = else_branch {
-                    self.expr(e);
-                }
-            }
-            Expr::Call { callee, args } => {
-                // arguments can contain calls too e.g. `f(print(1))`
-                for arg in args {
-                    self.expr(arg);
-                }
-                if let Expr::Ident(name) = &callee.kind {
-                    self.check_call(name, &expr.span);
-                }
-            }
-        }
-    }
-
-    /// The heart of the checker: this call needs some effects and the
-    /// enclosing function has to allow every one of them
-    fn check_call(&mut self, name: &str, span: &Span) {
-        // same order as the interpreter; intrinsics first then user functions
-        let required: Vec<EffectPath> = if let Some(effect) = intrinsic_effect(name) {
-            vec![effect]
-        } else if let Some(effects) = self.table.get(name) {
-            effects.clone()
-        } else {
-            // unknown function: the interpreter reports that one (for now)
-            return;
-        };
-
-        for effect in required {
-            if !self.allowed.iter().any(|a| covers(a, &effect)) {
-                let needed = display(&effect);
-                self.errors.push(CheckError {
+    for call in &calls {
+        let required = effects_of_call(call.name, table);
+        for effect in required.iter() {
+            if !allowed.allows(effect) {
+                errors.push(CheckError {
                     message: format!(
-                        "calling `{name}` requires effect `{needed}`, but `{}` doesn't declare it (add `uses {needed}`)",
-                        self.fn_name
+                        "calling `{}` requires effect `{}`, but `{}` doesn't declare it (add `uses {}`)",
+                        call.name,
+                        display(effect),
+                        decl.name,
+                        suggested.render()
                     ),
-                    span: span.clone(),
+                    span: call.span.clone(),
                 });
             }
         }
@@ -151,15 +72,30 @@ mod tests {
         }
     }
 
+    fn line_col(src: &str, offset: usize) -> (usize, usize) {
+        let before = &src[..offset.min(src.len())];
+        let line = before.matches('\n').count() + 1;
+        let col = match before.rfind('\n') {
+            Some(i) => before.len() - i,
+            None => before.len() + 1,
+        };
+        (line, col)
+    }
+
     #[test]
     fn pure_functions_are_fine() {
         assert!(errors("fn add(a: int, b: int) -> int { a + b }").is_empty());
     }
 
     #[test]
+    fn main_must_declare_its_effects_even_though_private() {
+        assert_eq!(errors("fn main() { print(1) }").len(), 1);
+    }
+
+    #[test]
     fn print_needs_io_print() {
         assert_eq!(
-            errors("fn main() { print(1) }"),
+            errors("pub fn main() { print(1) }"),
             vec![
                 "calling `print` requires effect `io.print`, but `main` doesn't declare it (add `uses io.print`)"
             ]
@@ -191,7 +127,7 @@ mod tests {
 
     #[test]
     fn calling_an_effectful_function_needs_its_effects() {
-        let src = "fn say() uses io.print { print(1) }\nfn main() { say() }";
+        let src = "fn say() uses io.print { print(1) }\npub fn main() { say() }";
         assert_eq!(
             errors(src),
             vec![
@@ -202,16 +138,62 @@ mod tests {
 
     #[test]
     fn calls_nested_in_control_flow_are_found() {
-        assert_eq!(errors("fn main() { if true { print(1) } }").len(), 1);
+        assert_eq!(errors("pub fn main() { if true { print(1) } }").len(), 1);
         assert_eq!(
-            errors("fn main() { let mut i = 0\n while i < 3 { print(i)\n i = i + 1 } }").len(),
+            errors("pub fn main() { let mut i = 0\n while i < 3 { print(i)\n i = i + 1 } }").len(),
             1
         );
     }
 
     #[test]
     fn every_bad_call_is_reported() {
-        assert_eq!(errors("fn a() { print(1) }\nfn b() { print(2) }").len(), 2);
+        assert_eq!(
+            errors("pub fn a() { print(1) }\npub fn b() { print(2) }").len(),
+            2
+        );
+    }
+
+    #[test]
+    fn private_helpers_need_no_uses() {
+        let src = "fn helper() { print(1) }\nfn main() uses io.print { helper() }";
+        assert!(errors(src).is_empty());
+    }
+
+    #[test]
+    fn inferred_effects_reach_a_pub_function_through_a_chain() {
+        let src = "fn a() { b() }\nfn b() { print(1) }\npub fn main() { a() }";
+        assert_eq!(
+            errors(src),
+            vec![
+                "calling `a` requires effect `io.print`, but `main` doesn't declare it (add `uses io.print`)"
+            ]
+        );
+    }
+
+    #[test]
+    fn mutual_recursion_is_fine_when_the_caller_declares_it() {
+        let src = "fn ping() { pong() }\nfn pong() { print(1)\n ping() }\nfn main() uses io.print { ping() }";
+        assert!(errors(src).is_empty());
+    }
+
+    #[test]
+    fn explicit_uses_on_a_private_function_is_a_ceiling() {
+        assert_eq!(errors("fn f() uses fs.read { print(1) }").len(), 1);
+    }
+
+    #[test]
+    fn declaring_more_than_needed_is_allowed() {
+        assert!(errors("pub fn f() uses io.print, fs.read { print(1) }").is_empty());
+    }
+
+    #[test]
+    fn suggestion_is_the_complete_uses_clause() {
+        assert_eq!(
+            errors("pub fn f() uses fs.read { print(1) }"),
+            vec![
+                "calling `print` requires effect `io.print`, but `f` doesn't declare it (add `uses fs.read, io.print`)"
+            ]
+        );
     }
 
     #[test]
@@ -229,5 +211,41 @@ mod tests {
             }
         }
         assert!(count > 0, "no examples found");
+    }
+
+    #[test]
+    fn error_examples_are_rejected_as_expected() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/errors");
+        let mut count = 0;
+        for entry in std::fs::read_dir(dir).expect("examples/errors dir should exist") {
+            let path = entry.expect("readable entry").path();
+            if path.extension().is_none_or(|e| e != "wd") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("readable file");
+            let header = src
+                .lines()
+                .next()
+                .and_then(|l| l.strip_prefix("// expect: "))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} needs a first line like `// expect: 3:5 message`",
+                        path.display()
+                    )
+                });
+            let (pos, message) = header
+                .split_once(' ')
+                .expect("header is `line:col message`");
+
+            let program = parse(&src).expect("error example should still parse");
+            let errs = check(&program).expect_err("example should be rejected");
+            assert_eq!(errs.len(), 1, "{}: {errs:?}", path.display());
+
+            let (line, col) = line_col(&src, errs[0].span.start);
+            assert_eq!(format!("{line}:{col}"), pos, "{}", path.display());
+            assert_eq!(errs[0].message, message, "{}", path.display());
+            count += 1;
+        }
+        assert!(count > 0, "no error examples found");
     }
 }
