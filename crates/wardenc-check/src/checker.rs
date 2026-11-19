@@ -72,9 +72,24 @@ mod tests {
         }
     }
 
+    fn line_col(src: &str, offset: usize) -> (usize, usize) {
+        let before = &src[..offset.min(src.len())];
+        let line = before.matches('\n').count() + 1;
+        let col = match before.rfind('\n') {
+            Some(i) => before.len() - i,
+            None => before.len() + 1,
+        };
+        (line, col)
+    }
+
     #[test]
     fn pure_functions_are_fine() {
         assert!(errors("fn add(a: int, b: int) -> int { a + b }").is_empty());
+    }
+
+    #[test]
+    fn main_must_declare_its_effects_even_though_private() {
+        assert_eq!(errors("fn main() { print(1) }").len(), 1);
     }
 
     #[test]
@@ -196,5 +211,41 @@ mod tests {
             }
         }
         assert!(count > 0, "no examples found");
+    }
+
+    #[test]
+    fn error_examples_are_rejected_as_expected() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/errors");
+        let mut count = 0;
+        for entry in std::fs::read_dir(dir).expect("examples/errors dir should exist") {
+            let path = entry.expect("readable entry").path();
+            if path.extension().is_none_or(|e| e != "wd") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("readable file");
+            let header = src
+                .lines()
+                .next()
+                .and_then(|l| l.strip_prefix("// expect: "))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} needs a first line like `// expect: 3:5 message`",
+                        path.display()
+                    )
+                });
+            let (pos, message) = header
+                .split_once(' ')
+                .expect("header is `line:col message`");
+
+            let program = parse(&src).expect("error example should still parse");
+            let errs = check(&program).expect_err("example should be rejected");
+            assert_eq!(errs.len(), 1, "{}: {errs:?}", path.display());
+
+            let (line, col) = line_col(&src, errs[0].span.start);
+            assert_eq!(format!("{line}:{col}"), pos, "{}", path.display());
+            assert_eq!(errs[0].message, message, "{}", path.display());
+            count += 1;
+        }
+        assert!(count > 0, "no error examples found");
     }
 }

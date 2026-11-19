@@ -88,7 +88,7 @@ pub fn declared_set(decl: &FnDecl) -> EffectSet {
 /// contract) and private ones with a `uses` clause (a ceiling), everything
 /// else is inferred
 pub fn is_fixed(decl: &FnDecl) -> bool {
-    decl.is_pub || !decl.effects.is_empty()
+    decl.is_pub || decl.name == "main" || !decl.effects.is_empty()
 }
 
 /// The effects of calling `name`. Uses same order as the interpreter:
@@ -155,9 +155,15 @@ mod tests {
 
     #[test]
     fn private_helper_is_inferred() {
-        let src = "fn say() { print(1) }\nfn main() { say() }";
+        let src = "fn say() { print(1) }\nfn outer() { say() }";
         assert_eq!(effects_of(src, "say"), "io.print");
-        assert_eq!(effects_of(src, "main"), "io.print");
+        assert_eq!(effects_of(src, "outer"), "io.print");
+    }
+
+    #[test]
+    fn main_is_never_inferred() {
+        assert_eq!(effects_of("fn main() { print(1) }", "main"), "");
+        assert_eq!(effects_of("fn main() uses io { print(1) }", "main"), "io");
     }
 
     #[test]
