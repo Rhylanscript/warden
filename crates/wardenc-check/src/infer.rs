@@ -84,6 +84,13 @@ pub fn declared_set(decl: &FnDecl) -> EffectSet {
     EffectSet::from_paths(decl.effects.iter().map(|e| e.kind.path.clone()))
 }
 
+/// Fixed functions state their effects themselves: `pub` ones (the public
+/// contract) and private ones with a `uses` clause (a ceiling), everything
+/// else is inferred
+pub fn is_fixed(decl: &FnDecl) -> bool {
+    decl.is_pub || !decl.effects.is_empty()
+}
+
 /// The effects of calling `name`. Uses same order as the interpreter:
 /// intrinsics first, then user functions. Unknown functions give an empty
 /// set (the interpreter will report those for now)
@@ -108,7 +115,7 @@ pub fn effective_effects(program: &Program) -> EffectTable<'_> {
     for item in &program.items {
         let Item::Fn(decl) = &item.kind;
         let name = decl.name.as_str();
-        if decl.is_pub || !decl.effects.is_empty() {
+        if is_fixed(decl) {
             table.insert(name, declared_set(decl));
         } else {
             table.insert(name, EffectSet::new());
