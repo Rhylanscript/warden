@@ -1,0 +1,4 @@
+// expect: 3:5 calling `print` requires effect `io.print`, but `main` doesn't declare it (add `uses io.print`)
+fn main() {
+    print("hi")
+}

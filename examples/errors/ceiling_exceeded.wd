@@ -1,0 +1,8 @@
+// expect: 3:5 calling `print` requires effect `io.print`, but `quiet` doesn't declare it (add `uses fs.read, io.print`)
+fn quiet() uses fs.read {
+    print("oops")
+}
+
+fn main() uses io.print, fs.read {
+    quiet()
+}
